@@ -6,6 +6,7 @@
 #include <memory>
 #include <stdexcept>
 #include <iostream>
+#include "fp16_util.cuh"
 
 #ifdef USE_CUDA
 #include <cuda_runtime.h>
@@ -71,6 +72,10 @@ public:
     // Direct access to the raw device/host cache pointers for kernel execution
     half_type* get_k_cache_ptr() const { return d_k_cache_; }
     half_type* get_v_cache_ptr() const { return d_v_cache_; }
+
+    // Safely writes a token vector into physical cache memory.
+    // Performs host-to-device transfer on CUDA; encodes to IEEE 754 half on CPU fallback.
+    bool write_kv(bool is_k, int32_t physical_block, int32_t token_offset, int32_t head_idx, const float* host_data, size_t count);
 };
 
 // C-compatible factory functions for FFI
@@ -84,6 +89,14 @@ extern "C" {
     int32_t kv_cache_manager_free_count(KVCacheMemoryManager* mgr);
     void* kv_cache_manager_k_ptr(KVCacheMemoryManager* mgr);
     void* kv_cache_manager_v_ptr(KVCacheMemoryManager* mgr);
+    bool kv_cache_manager_write_kv(
+        KVCacheMemoryManager* mgr,
+        bool is_k,
+        int32_t physical_block,
+        int32_t token_offset,
+        int32_t head_idx,
+        const float* host_data,
+        size_t count);
 }
 
 } // namespace infer_rs

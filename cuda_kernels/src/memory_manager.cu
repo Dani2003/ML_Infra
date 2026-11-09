@@ -114,6 +114,50 @@ int32_t KVCacheMemoryManager::get_free_block_count() {
     return static_cast<int32_t>(free_blocks_.size());
 }
 
+bool KVCacheMemoryManager::write_kv(
+    bool is_k,
+    int32_t physical_block,
+    int32_t token_offset,
+    int32_t head_idx,
+    const float* host_data,
+    size_t count)
+{
+    if (physical_block < 0 || physical_block >= num_blocks_) return false;
+    if (token_offset < 0 || token_offset >= block_size_) return false;
+    if (head_idx < 0 || head_idx >= num_heads_) return false;
+    if (count != static_cast<size_t>(head_dim_)) return false;
+    if (!host_data) return false;
+
+    int block_stride = block_size_ * num_heads_ * head_dim_;
+    int token_stride = num_heads_ * head_dim_;
+    int head_stride = head_dim_;
+    size_t offset = static_cast<size_t>(physical_block) * block_stride +
+                    token_offset * token_stride +
+                    head_idx * head_stride;
+
+    std::vector<half_type> half_buffer(count);
+    for (size_t i = 0; i < count; ++i) {
+#ifdef USE_CUDA
+        half_buffer[i] = __float2half(host_data[i]);
+#else
+        half_buffer[i] = float_to_half_bits(host_data[i]);
+#endif
+    }
+
+    half_type* dst = (is_k ? d_k_cache_ : d_v_cache_) + offset;
+#ifdef USE_CUDA
+    if (is_cuda_allocated_) {
+        return cudaMemcpy(dst, half_buffer.data(), count * sizeof(half), cudaMemcpyHostToDevice) == cudaSuccess;
+    } else {
+        std::memcpy(dst, half_buffer.data(), count * sizeof(half_type));
+        return true;
+    }
+#else
+    std::memcpy(dst, half_buffer.data(), count * sizeof(half_type));
+    return true;
+#endif
+}
+
 // C-compatible FFI wrappers
 extern "C" {
 
@@ -128,23 +172,45 @@ KVCacheMemoryManager* kv_cache_manager_create(
 }
 
 void kv_cache_manager_destroy(KVCacheMemoryManager* mgr) {
-    delete mgr;
+    try {
+        delete mgr;
+    } catch (...) {}
 }
 
 int32_t kv_cache_manager_allocate(KVCacheMemoryManager* mgr) {
-    return mgr ? mgr->allocate_block() : -1;
+    if (!mgr) return -1;
+    try {
+        return mgr->allocate_block();
+    } catch (...) {
+        return -1;
+    }
 }
 
 bool kv_cache_manager_free(KVCacheMemoryManager* mgr, int32_t block_id) {
-    return mgr ? mgr->free_block(block_id) : false;
+    if (!mgr) return false;
+    try {
+        return mgr->free_block(block_id);
+    } catch (...) {
+        return false;
+    }
 }
 
 bool kv_cache_manager_free_batch(KVCacheMemoryManager* mgr, const int32_t* block_ids, size_t count) {
-    return mgr ? mgr->free_blocks(block_ids, count) : false;
+    if (!mgr) return false;
+    try {
+        return mgr->free_blocks(block_ids, count);
+    } catch (...) {
+        return false;
+    }
 }
 
 int32_t kv_cache_manager_free_count(KVCacheMemoryManager* mgr) {
-    return mgr ? mgr->get_free_block_count() : 0;
+    if (!mgr) return 0;
+    try {
+        return mgr->get_free_block_count();
+    } catch (...) {
+        return 0;
+    }
 }
 
 void* kv_cache_manager_k_ptr(KVCacheMemoryManager* mgr) {
@@ -153,6 +219,23 @@ void* kv_cache_manager_k_ptr(KVCacheMemoryManager* mgr) {
 
 void* kv_cache_manager_v_ptr(KVCacheMemoryManager* mgr) {
     return mgr ? static_cast<void*>(mgr->get_v_cache_ptr()) : nullptr;
+}
+
+bool kv_cache_manager_write_kv(
+    KVCacheMemoryManager* mgr,
+    bool is_k,
+    int32_t physical_block,
+    int32_t token_offset,
+    int32_t head_idx,
+    const float* host_data,
+    size_t count)
+{
+    if (!mgr) return false;
+    try {
+        return mgr->write_kv(is_k, physical_block, token_offset, head_idx, host_data, count);
+    } catch (...) {
+        return false;
+    }
 }
 
 } // extern "C"

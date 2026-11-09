@@ -3,10 +3,10 @@
 High-Throughput Load Testing and Benchmark Suite for infer-rs
 Asynchronous Continuous Batching Benchmark and KV Cache Telemetry Probe.
 Measures:
-  - Throughput (tokens/sec and requests/sec)
-  - Latency percentiles (p50, p90, p95, p99)
-  - Inter-token latency (ITL)
-  - KV Cache physical block utilization & zero-leak memory verification
+  - Request Throughput (req/sec) and Token Throughput (tokens/sec)
+  - End-to-end request latency distribution (mean, p50, p90, p95, p99)
+  - Estimated per-step iteration pace (derived from request duration / token count)
+  - KV Cache physical block pool allocation & recovery verification via /metrics
 """
 
 import argparse
@@ -153,7 +153,7 @@ async def run_benchmark(base_url: str, num_requests: int, concurrency: int, min_
     print(f"Total Tokens Emitted  : {total_tokens} tokens")
     print(f"Token Throughput      : {throughput_tokens_sec:.1f} tokens/sec (mock runner)")
     print(f"Request Throughput    : {throughput_reqs_sec:.2f} req/sec")
-    print(f"Est. Step Latency     : ~{avg_itl:.2f} ms/step")
+    print(f"Est. Step Latency     : ~{avg_itl:.2f} ms/step (mean response duration / tokens)")
     print("-" * 70)
     print("LATENCY DISTRIBUTION (End-to-End):")
     print(f"  - Mean Latency : {avg_lat * 1000:.1f} ms")

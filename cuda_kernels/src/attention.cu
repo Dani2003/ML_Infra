@@ -1,4 +1,5 @@
 #include "../include/attention.cuh"
+#include "../include/fp16_util.cuh"
 #include <cmath>
 #include <vector>
 #include <algorithm>
@@ -226,7 +227,7 @@ extern "C" int32_t paged_attention_decode(const PagedAttentionParams* params) {
 
                     float dot = 0.0f;
                     for (int d = 0; d < params->head_dim; ++d) {
-                        dot += q[d] * static_cast<float>(k_vec[d]);
+                        dot += q[d] * half_bits_to_float(k_vec[d]);
                     }
                     logits[t] = dot * params->scale;
                     max_val = std::max(max_val, logits[t]);
@@ -249,7 +250,7 @@ extern "C" int32_t paged_attention_decode(const PagedAttentionParams* params) {
                         const uint16_t* v_vec = v_cache + phys_block * block_stride 
                                                         + block_offset * token_stride 
                                                         + h * head_stride;
-                        acc += (logits[t] * inv_sum) * static_cast<float>(v_vec[d]);
+                        acc += (logits[t] * inv_sum) * half_bits_to_float(v_vec[d]);
                     }
                     out[d] = acc;
                 }

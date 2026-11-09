@@ -57,6 +57,15 @@ unsafe extern "C" {
     fn kv_cache_manager_free_count(mgr: *mut c_void) -> i32;
     fn kv_cache_manager_k_ptr(mgr: *mut c_void) -> *mut c_void;
     fn kv_cache_manager_v_ptr(mgr: *mut c_void) -> *mut c_void;
+    fn kv_cache_manager_write_kv(
+        mgr: *mut c_void,
+        is_k: bool,
+        physical_block: i32,
+        token_offset: i32,
+        head_idx: i32,
+        host_data: *const f32,
+        count: usize,
+    ) -> bool;
 
     fn paged_attention_decode(params: *const PagedAttentionParams) -> i32;
 }
@@ -146,18 +155,18 @@ impl GpuKVCacheManager {
         unsafe { kv_cache_manager_v_ptr(self.raw) }
     }
 
-    /// Write a token's K or V vector directly to the cache buffer.
-    /// Used for unit testing and CPU reference verification.
+    /// Safely write a token's K or V vector directly to physical cache memory.
     ///
-    /// # Safety
-    /// Caller must ensure physical_block, token_offset, and head_idx are within bounds.
-    pub unsafe fn write_test_kv(
+    /// Backend-correct on both architectures:
+    /// - On CUDA: performs host-to-device transfer via `cudaMemcpy` after converting floats to `half`.
+    /// - On CPU: encodes floats into standard IEEE 754 half-precision bit patterns in the host pool.
+    pub fn write_kv_token(
         &self,
         is_k: bool,
         physical_block: usize,
         token_offset: usize,
         head_idx: usize,
-        data: &[u16],
+        data: &[f32],
     ) -> Result<(), FfiError> {
         if physical_block >= self.total_blocks
             || token_offset >= self.block_size
@@ -167,25 +176,27 @@ impl GpuKVCacheManager {
             return Err(FfiError::InvalidArgument);
         }
 
-        let ptr = if is_k {
-            self.k_cache_ptr() as *mut u16
-        } else {
-            self.v_cache_ptr() as *mut u16
+        let pb = i32::try_from(physical_block).map_err(|_| FfiError::InvalidArgument)?;
+        let to = i32::try_from(token_offset).map_err(|_| FfiError::InvalidArgument)?;
+        let hi = i32::try_from(head_idx).map_err(|_| FfiError::InvalidArgument)?;
+
+        let ok = unsafe {
+            kv_cache_manager_write_kv(
+                self.raw,
+                is_k,
+                pb,
+                to,
+                hi,
+                data.as_ptr(),
+                data.len(),
+            )
         };
 
-        if ptr.is_null() {
-            return Err(FfiError::InitFailed);
+        if ok {
+            Ok(())
+        } else {
+            Err(FfiError::KernelError(-1))
         }
-
-        let block_stride = self.block_size * self.num_heads * self.head_dim;
-        let token_stride = self.num_heads * self.head_dim;
-        let head_stride = self.head_dim;
-
-        let offset = physical_block * block_stride + token_offset * token_stride + head_idx * head_stride;
-        unsafe {
-            std::ptr::copy_nonoverlapping(data.as_ptr(), ptr.add(offset), self.head_dim);
-        }
-        Ok(())
     }
 
     /// Execute PagedAttention decode step across the active batch.
@@ -551,14 +562,12 @@ mod tests {
         let q = vec![1.0f32, 0.0f32];
         let mut output = vec![0.0f32; 2];
 
-        // Token 0: K = [1, 0], V = [10, 20]
-        // Token 1: K = [0, 1], V = [30, 40]
-        unsafe {
-            mgr.write_test_kv(true, 0, 0, 0, &[1, 0]).unwrap();
-            mgr.write_test_kv(false, 0, 0, 0, &[10, 20]).unwrap();
-            mgr.write_test_kv(true, 0, 1, 0, &[0, 1]).unwrap();
-            mgr.write_test_kv(false, 0, 1, 0, &[30, 40]).unwrap();
-        }
+        // Token 0: K = [1.0, 0.0], V = [10.0, 20.0]
+        // Token 1: K = [0.0, 1.0], V = [30.0, 40.0]
+        mgr.write_kv_token(true, 0, 0, 0, &[1.0, 0.0]).unwrap();
+        mgr.write_kv_token(false, 0, 0, 0, &[10.0, 20.0]).unwrap();
+        mgr.write_kv_token(true, 0, 1, 0, &[0.0, 1.0]).unwrap();
+        mgr.write_kv_token(false, 0, 1, 0, &[30.0, 40.0]).unwrap();
 
         let block_tables = vec![0i32];
         let context_lens = vec![2i32];
@@ -610,15 +619,13 @@ mod tests {
 
         // Logical Token 0 mapped to physical block 1
         // Logical Token 1 mapped to physical block 0
-        unsafe {
-            // Block 1 (Token 0): K = [1, 0], V = [10, 20]
-            mgr.write_test_kv(true, 1, 0, 0, &[1, 0]).unwrap();
-            mgr.write_test_kv(false, 1, 0, 0, &[10, 20]).unwrap();
+        // Block 1 (Token 0): K = [1.0, 0.0], V = [10.0, 20.0]
+        mgr.write_kv_token(true, 1, 0, 0, &[1.0, 0.0]).unwrap();
+        mgr.write_kv_token(false, 1, 0, 0, &[10.0, 20.0]).unwrap();
 
-            // Block 0 (Token 1): K = [0, 1], V = [30, 40]
-            mgr.write_test_kv(true, 0, 0, 0, &[0, 1]).unwrap();
-            mgr.write_test_kv(false, 0, 0, 0, &[30, 40]).unwrap();
-        }
+        // Block 0 (Token 1): K = [0.0, 1.0], V = [30.0, 40.0]
+        mgr.write_kv_token(true, 0, 0, 0, &[0.0, 1.0]).unwrap();
+        mgr.write_kv_token(false, 0, 0, 0, &[30.0, 40.0]).unwrap();
 
         // Logical-to-physical block table: [block 1, block 0]
         let block_tables = vec![1i32, 0i32];
