@@ -1,6 +1,6 @@
 # infer-rs: LLM Serving Infrastructure & PagedAttention Prototype
 
-[![Build & Test](https://img.shields.io/badge/tests-18%20passed%20(CPU)-brightgreen.svg)]()
+[![Build & Test](https://img.shields.io/badge/tests-18%20passed%20(CPU%20%2B%20CUDA)-brightgreen.svg)]()
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)]()
 [![C++/CUDA](https://img.shields.io/badge/C%2B%2B-17%20%2F%20CUDA-blue.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)]()
@@ -9,7 +9,7 @@
 1. **Dynamic Continuous Batching:** An iteration-level request scheduler that fills batch slots dynamically at step boundaries rather than stalling on full sequence completion.
 2. **PagedAttention Virtual Memory Management:** A fixed-size physical block allocator and block table mapping designed to eliminate memory fragmentation during generation.
 
-> **Project Stage:** This repository is an active infrastructure prototype (Gate 1 & Gate 2 of the [Engineering Roadmap](docs/roadmap.md)). The request pipeline, scheduler, CPU reference kernels (18 automated tests passing on CPU fallback), and C++ memory manager are fully tested. The CUDA path is currently implemented with explicit device staging and compiled conditionally; physical GPU benchmarking requires an NVIDIA device with `nvcc`. Real model weight execution and tokenizer integration are currently under development.
+> **Project Stage:** This repository is an active infrastructure prototype (Gate 1 & Gate 2 of the [Engineering Roadmap](docs/roadmap.md)). The request pipeline, scheduler, CPU reference kernels, and C++ memory manager are fully tested. The custom CUDA PagedAttention kernel and memory manager are **empirically validated on NVIDIA Tesla T4 GPU hardware (CUDA / NVCC)**, passing all native numerical attention tests. Real model weight execution, prompt prefill, and tokenizer integration are planned for the next development milestone.
 
 ---
 
@@ -92,7 +92,7 @@
 | **PagedAttention Memory Manager** | **Complete** | Rust control-plane + C++ block pool with double-free checks |
 | **Zero-Leak RAII Lifecycle** | **Complete** | Verified 100% block recovery across concurrent test requests |
 | **Native FFI Bridge** | **Complete** | Safe Rust wrapper over C++ allocation and kernel entry points |
-| **CUDA Attention Kernel** | **Prototype** | Implemented with device staging; GPU validation ongoing |
+| **CUDA Attention Kernel** | **Hardware-Validated** | Verified on NVIDIA Tesla T4 with NVCC compilation & GPU device execution |
 | **Model Weights & Prefill Phase** | **Planned (Gate 2)** | Decoder model selection (e.g. TinyLlama / Llama-3) |
 | **Empirical Static vs Continuous Benchmark** | **Planned (Gate 3)** | Requires real tensor backend for valid comparison |
 
@@ -107,7 +107,7 @@ See [docs/roadmap.md](docs/roadmap.md) for the complete milestone gates and exit
 * **C++ Compiler:** MSVC (Visual Studio 2022 C++ Build Tools) or GCC/Clang
 * **CUDA Toolkit (Optional):** Automatically detected by `build.rs` if `nvcc` is installed.
 
-### 1. Run Unit Tests (18 Automated Tests on CPU Fallback)
+### 1. Run Unit Tests (18 Automated Tests on CPU & CUDA)
 ```powershell
 cargo test
 ```
