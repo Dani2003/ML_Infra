@@ -5,7 +5,7 @@ Asynchronous Continuous Batching Benchmark and KV Cache Telemetry Probe.
 Measures:
   - Request Throughput (req/sec) and Token Throughput (tokens/sec)
   - End-to-end request latency distribution (mean, p50, p90, p95, p99)
-  - Estimated per-step iteration pace (derived from request duration / token count)
+  - Estimated step latency (approximation: total request duration / emitted tokens, not measured per-token latency)
   - KV Cache physical block pool allocation & recovery verification via /metrics
 """
 
@@ -153,7 +153,7 @@ async def run_benchmark(base_url: str, num_requests: int, concurrency: int, min_
     print(f"Total Tokens Emitted  : {total_tokens} tokens")
     print(f"Token Throughput      : {throughput_tokens_sec:.1f} tokens/sec (mock runner)")
     print(f"Request Throughput    : {throughput_reqs_sec:.2f} req/sec")
-    print(f"Est. Step Latency     : ~{avg_itl:.2f} ms/step (mean response duration / tokens)")
+    print(f"Est. Step Latency     : ~{avg_itl:.2f} ms/step (approximation: request duration / token count, not measured per-token latency)")
     print("-" * 70)
     print("LATENCY DISTRIBUTION (End-to-End):")
     print(f"  - Mean Latency : {avg_lat * 1000:.1f} ms")

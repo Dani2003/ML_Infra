@@ -71,7 +71,7 @@
 
 ### 3. Dual-Mode Hardware Layer & FFI Bridge (`crates/model-runner`)
 * `build.rs` automatically detects the presence of NVIDIA CUDA compilers (`nvcc`).
-* **CUDA Mode:** Compiles device kernels with explicit host-to-device staging transfers and stream synchronization.
+* **CUDA Mode:** Compiles device kernels with explicit host-to-device staging transfers and device synchronization (`cudaDeviceSynchronize`).
 * **CPU Reference Mode:** When compiling on systems without an NVIDIA GPU (e.g., standard laptops or CI runners), compiles an equivalent C++ reference implementation, allowing the entire FFI boundary and lifecycle to be compiled and verified anywhere.
 
 ### 4. Telemetry & Observability (`/metrics`)
