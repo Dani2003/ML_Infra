@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 High-Throughput Load Testing and Benchmark Suite for infer-rs
-Compares Continuous Batching vs. Static Batching Baselines.
+Asynchronous Continuous Batching Benchmark and KV Cache Telemetry Probe.
 Measures:
   - Throughput (tokens/sec and requests/sec)
   - Latency percentiles (p50, p90, p95, p99)
