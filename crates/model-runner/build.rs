@@ -17,18 +17,38 @@ fn main() {
     build.file(cuda_kernels_dir.join("src").join("attention.cu"));
 
     // Check if CUDA / NVCC is available
-    let has_nvcc = std::process::Command::new("nvcc")
+    let nvcc_cmd = if std::process::Command::new("nvcc")
         .arg("--version")
         .output()
         .map(|o| o.status.success())
-        .unwrap_or(false);
+        .unwrap_or(false)
+    {
+        Some("nvcc".to_string())
+    } else if std::path::Path::new("/usr/local/cuda/bin/nvcc").exists() {
+        Some("/usr/local/cuda/bin/nvcc".to_string())
+    } else {
+        None
+    };
 
-    if has_nvcc {
+    if let Some(nvcc_path) = nvcc_cmd {
+        println!("cargo:warning=model-runner: NVCC detected at {}; compiling CUDA kernels.", nvcc_path);
         println!("cargo:rustc-cfg=feature=\"cuda\"");
+        println!("cargo:rustc-link-lib=cudart");
+
+        if let Ok(cuda_path) = std::env::var("CUDA_HOME").or_else(|_| std::env::var("CUDA_PATH")) {
+            println!("cargo:rustc-link-search=native={}/lib64", cuda_path);
+            println!("cargo:rustc-link-search=native={}/lib/x64", cuda_path);
+            println!("cargo:rustc-link-search=native={}/lib", cuda_path);
+        } else {
+            println!("cargo:rustc-link-search=native=/usr/local/cuda/lib64");
+            println!("cargo:rustc-link-search=native=/usr/local/cuda/lib");
+        }
+
+        build.compiler(&nvcc_path);
         build.define("USE_CUDA", None);
         build.cuda(true);
     } else {
-        println!("cargo:warning=NVCC not detected; building with CPU/portable reference kernels.");
+        println!("cargo:warning=model-runner@0.1.0: NVCC not detected; building with CPU/portable reference kernels.");
     }
 
     build.compile("cuda_kernels");
