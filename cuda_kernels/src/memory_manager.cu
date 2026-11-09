@@ -26,8 +26,17 @@ KVCacheMemoryManager::KVCacheMemoryManager(
     CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_k_cache_), total_bytes));
     CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_v_cache_), total_bytes));
     is_cuda_allocated_ = true;
-    std::cout << "[KVCache] Allocated " << (total_bytes * 2) / (1024 * 1024)
-              << " MB on CUDA device." << std::endl;
+    size_t total_allocated_bytes = total_bytes * 2;
+    if (total_allocated_bytes >= 1024 * 1024) {
+        std::cout << "[KVCache] Allocated " << (total_allocated_bytes / (1024 * 1024))
+                  << " MB on CUDA device." << std::endl;
+    } else if (total_allocated_bytes >= 1024) {
+        std::cout << "[KVCache] Allocated " << (total_allocated_bytes / 1024)
+                  << " KiB on CUDA device." << std::endl;
+    } else {
+        std::cout << "[KVCache] Allocated " << total_allocated_bytes
+                  << " bytes on CUDA device." << std::endl;
+    }
 #else
     // Host fallback for CPU/portable builds
     d_k_cache_ = static_cast<half_type*>(std::malloc(total_bytes));
