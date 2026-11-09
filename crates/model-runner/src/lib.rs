@@ -92,14 +92,16 @@ impl ModelRunner for PagedAttentionRunner {
         let mut output = vec![0.0f32; num_seqs * num_heads * head_dim];
         let scale = 1.0 / (head_dim as f32).sqrt();
 
-        self.cache_manager.decode_attention(
-            &query,
-            &block_tables,
-            &context_lens,
-            max_blocks,
-            scale,
-            &mut output,
-        );
+        self.cache_manager
+            .decode_attention(
+                &query,
+                &block_tables,
+                &context_lens,
+                max_blocks,
+                scale,
+                &mut output,
+            )
+            .map_err(|err| RunnerError(err.to_string()))?;
 
         Ok(batch
             .iter()

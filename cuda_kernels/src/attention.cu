@@ -109,123 +109,157 @@ __global__ void paged_attention_kernel(
 
 namespace infer_rs {
 
-extern "C" void paged_attention_decode(const PagedAttentionParams* params) {
-    if (!params || params->num_seqs <= 0 || params->num_heads <= 0) return;
-
 #ifdef USE_CUDA
-    size_t query_bytes = static_cast<size_t>(params->num_seqs) * params->num_heads * params->head_dim * sizeof(float);
-    size_t block_table_bytes = static_cast<size_t>(params->num_seqs) * params->max_blocks_per_seq * sizeof(int32_t);
-    size_t context_lens_bytes = static_cast<size_t>(params->num_seqs) * sizeof(int32_t);
-    size_t output_bytes = query_bytes;
+struct CudaDeviceBuffer {
+    void* ptr = nullptr;
+    explicit CudaDeviceBuffer(size_t bytes) {
+        if (cudaMalloc(&ptr, bytes) != cudaSuccess) {
+            ptr = nullptr;
+        }
+    }
+    ~CudaDeviceBuffer() {
+        if (ptr) {
+            cudaFree(ptr);
+            ptr = nullptr;
+        }
+    }
+    template<typename T>
+    T* as() { return reinterpret_cast<T*>(ptr); }
+};
+#endif
 
-    float* d_query = nullptr;
-    int32_t* d_block_tables = nullptr;
-    int32_t* d_context_lens = nullptr;
-    float* d_output = nullptr;
+extern "C" int32_t paged_attention_decode(const PagedAttentionParams* params) {
+    if (!params) return PAGED_ATTN_INVALID_ARGUMENT;
+    if (params->num_seqs <= 0 || params->num_heads <= 0 || params->head_dim <= 0 ||
+        params->block_size <= 0 || params->max_blocks_per_seq <= 0) {
+        return PAGED_ATTN_INVALID_ARGUMENT;
+    }
+    if (!params->query || !params->k_cache || !params->v_cache ||
+        !params->block_tables || !params->context_lens || !params->output) {
+        return PAGED_ATTN_INVALID_ARGUMENT;
+    }
 
-    CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_query), query_bytes));
-    CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_block_tables), block_table_bytes));
-    CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_context_lens), context_lens_bytes));
-    CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_output), output_bytes));
+    for (int32_t s = 0; s < params->num_seqs; ++s) {
+        if (params->context_lens[s] > MAX_KERNEL_CONTEXT_LEN) {
+            return PAGED_ATTN_CONTEXT_TOO_LONG;
+        }
+    }
 
-    // Copy host inputs to device
-    CHECK_CUDA_ERROR(cudaMemcpy(d_query, params->query, query_bytes, cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR(cudaMemcpy(d_block_tables, params->block_tables, block_table_bytes, cudaMemcpyHostToDevice));
-    CHECK_CUDA_ERROR(cudaMemcpy(d_context_lens, params->context_lens, context_lens_bytes, cudaMemcpyHostToDevice));
+    try {
+#ifdef USE_CUDA
+        size_t query_bytes = static_cast<size_t>(params->num_seqs) * params->num_heads * params->head_dim * sizeof(float);
+        size_t block_table_bytes = static_cast<size_t>(params->num_seqs) * params->max_blocks_per_seq * sizeof(int32_t);
+        size_t context_lens_bytes = static_cast<size_t>(params->num_seqs) * sizeof(int32_t);
+        size_t output_bytes = query_bytes;
 
-    dim3 grid(params->num_seqs, params->num_heads);
-    dim3 block(std::min(params->head_dim, 256));
-    size_t shared_bytes = (params->head_dim + 2048) * sizeof(float);
+        CudaDeviceBuffer d_query(query_bytes);
+        CudaDeviceBuffer d_block_tables(block_table_bytes);
+        CudaDeviceBuffer d_context_lens(context_lens_bytes);
+        CudaDeviceBuffer d_output(output_bytes);
 
-    paged_attention_kernel<<<grid, block, shared_bytes>>>(
-        d_query,
-        reinterpret_cast<const half*>(params->k_cache),
-        reinterpret_cast<const half*>(params->v_cache),
-        d_block_tables,
-        d_context_lens,
-        d_output,
-        params->num_seqs,
-        params->num_heads,
-        params->head_dim,
-        params->block_size,
-        params->max_blocks_per_seq,
-        params->scale
-    );
-    CHECK_CUDA_ERROR(cudaGetLastError());
-    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+        if (!d_query.ptr || !d_block_tables.ptr || !d_context_lens.ptr || !d_output.ptr) {
+            return PAGED_ATTN_CUDA_ERROR;
+        }
 
-    // Copy device output back to host
-    CHECK_CUDA_ERROR(cudaMemcpy(params->output, d_output, output_bytes, cudaMemcpyDeviceToHost));
+        if (cudaMemcpy(d_query.ptr, params->query, query_bytes, cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(d_block_tables.ptr, params->block_tables, block_table_bytes, cudaMemcpyHostToDevice) != cudaSuccess ||
+            cudaMemcpy(d_context_lens.ptr, params->context_lens, context_lens_bytes, cudaMemcpyHostToDevice) != cudaSuccess) {
+            return PAGED_ATTN_CUDA_ERROR;
+        }
 
-    // Clean up staging buffers
-    cudaFree(d_query);
-    cudaFree(d_block_tables);
-    cudaFree(d_context_lens);
-    cudaFree(d_output);
+        dim3 grid(params->num_seqs, params->num_heads);
+        dim3 block(std::min(params->head_dim, 256));
+        size_t shared_bytes = (params->head_dim + MAX_KERNEL_CONTEXT_LEN) * sizeof(float);
+
+        paged_attention_kernel<<<grid, block, shared_bytes>>>(
+            d_query.as<float>(),
+            reinterpret_cast<const half*>(params->k_cache),
+            reinterpret_cast<const half*>(params->v_cache),
+            d_block_tables.as<int32_t>(),
+            d_context_lens.as<int32_t>(),
+            d_output.as<float>(),
+            params->num_seqs,
+            params->num_heads,
+            params->head_dim,
+            params->block_size,
+            params->max_blocks_per_seq,
+            params->scale
+        );
+
+        if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+            return PAGED_ATTN_CUDA_ERROR;
+        }
+
+        if (cudaMemcpy(params->output, d_output.ptr, output_bytes, cudaMemcpyDeviceToHost) != cudaSuccess) {
+            return PAGED_ATTN_CUDA_ERROR;
+        }
 #else
-    // CPU reference implementation of PagedAttention
-    int block_stride = params->block_size * params->num_heads * params->head_dim;
-    int token_stride = params->num_heads * params->head_dim;
-    int head_stride = params->head_dim;
+        // CPU reference implementation of PagedAttention
+        int block_stride = params->block_size * params->num_heads * params->head_dim;
+        int token_stride = params->num_heads * params->head_dim;
+        int head_stride = params->head_dim;
 
-    const uint16_t* k_cache = reinterpret_cast<const uint16_t*>(params->k_cache);
-    const uint16_t* v_cache = reinterpret_cast<const uint16_t*>(params->v_cache);
+        const uint16_t* k_cache = reinterpret_cast<const uint16_t*>(params->k_cache);
+        const uint16_t* v_cache = reinterpret_cast<const uint16_t*>(params->v_cache);
 
-    for (int s = 0; s < params->num_seqs; ++s) {
-        int context_len = params->context_lens[s];
-        if (context_len <= 0) continue;
+        for (int s = 0; s < params->num_seqs; ++s) {
+            int context_len = params->context_lens[s];
+            if (context_len <= 0) continue;
 
-        const int32_t* block_table = params->block_tables + s * params->max_blocks_per_seq;
+            const int32_t* block_table = params->block_tables + s * params->max_blocks_per_seq;
 
-        for (int h = 0; h < params->num_heads; ++h) {
-            const float* q = params->query + (s * params->num_heads + h) * params->head_dim;
-            float* out = params->output + (s * params->num_heads + h) * params->head_dim;
+            for (int h = 0; h < params->num_heads; ++h) {
+                const float* q = params->query + (s * params->num_heads + h) * params->head_dim;
+                float* out = params->output + (s * params->num_heads + h) * params->head_dim;
 
-            std::vector<float> logits(context_len, 0.0f);
-            float max_val = -1e30f;
+                std::vector<float> logits(context_len, 0.0f);
+                float max_val = -1e30f;
 
-            for (int t = 0; t < context_len; ++t) {
-                int logical_block = t / params->block_size;
-                int block_offset = t % params->block_size;
-                int phys_block = block_table[logical_block];
-
-                const uint16_t* k_vec = k_cache + phys_block * block_stride 
-                                                + block_offset * token_stride 
-                                                + h * head_stride;
-
-                float dot = 0.0f;
-                for (int d = 0; d < params->head_dim; ++d) {
-                    // Approximate float conversion from uint16_t for host mode
-                    dot += q[d] * static_cast<float>(k_vec[d]);
-                }
-                logits[t] = dot * params->scale;
-                max_val = std::max(max_val, logits[t]);
-            }
-
-            float sum_exp = 0.0f;
-            for (int t = 0; t < context_len; ++t) {
-                logits[t] = std::exp(logits[t] - max_val);
-                sum_exp += logits[t];
-            }
-            float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
-
-            for (int d = 0; d < params->head_dim; ++d) {
-                float acc = 0.0f;
                 for (int t = 0; t < context_len; ++t) {
                     int logical_block = t / params->block_size;
                     int block_offset = t % params->block_size;
                     int phys_block = block_table[logical_block];
 
-                    const uint16_t* v_vec = v_cache + phys_block * block_stride 
+                    const uint16_t* k_vec = k_cache + phys_block * block_stride 
                                                     + block_offset * token_stride 
                                                     + h * head_stride;
-                    acc += (logits[t] * inv_sum) * static_cast<float>(v_vec[d]);
+
+                    float dot = 0.0f;
+                    for (int d = 0; d < params->head_dim; ++d) {
+                        dot += q[d] * static_cast<float>(k_vec[d]);
+                    }
+                    logits[t] = dot * params->scale;
+                    max_val = std::max(max_val, logits[t]);
                 }
-                out[d] = acc;
+
+                float sum_exp = 0.0f;
+                for (int t = 0; t < context_len; ++t) {
+                    logits[t] = std::exp(logits[t] - max_val);
+                    sum_exp += logits[t];
+                }
+                float inv_sum = (sum_exp > 0.0f) ? (1.0f / sum_exp) : 0.0f;
+
+                for (int d = 0; d < params->head_dim; ++d) {
+                    float acc = 0.0f;
+                    for (int t = 0; t < context_len; ++t) {
+                        int logical_block = t / params->block_size;
+                        int block_offset = t % params->block_size;
+                        int phys_block = block_table[logical_block];
+
+                        const uint16_t* v_vec = v_cache + phys_block * block_stride 
+                                                        + block_offset * token_stride 
+                                                        + h * head_stride;
+                        acc += (logits[t] * inv_sum) * static_cast<float>(v_vec[d]);
+                    }
+                    out[d] = acc;
+                }
             }
         }
-    }
 #endif
+        return PAGED_ATTN_SUCCESS;
+    } catch (...) {
+        return PAGED_ATTN_EXCEPTION;
+    }
 }
 
 } // namespace infer_rs

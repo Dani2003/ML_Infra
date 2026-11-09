@@ -90,12 +90,15 @@ bool KVCacheMemoryManager::free_block(int32_t block_id) {
 bool KVCacheMemoryManager::free_blocks(const int32_t* block_ids, size_t count) {
     if (!block_ids || count == 0) return true;
     std::lock_guard<std::mutex> lock(mtx_);
-    // Validation pass: reject if any block is invalid or not currently allocated
+    // Validation pass: reject if any block is invalid, not currently allocated,
+    // or duplicated within this batch.
+    std::vector<bool> seen(num_blocks_, false);
     for (size_t i = 0; i < count; ++i) {
         int32_t id = block_ids[i];
-        if (id < 0 || id >= num_blocks_ || !is_allocated_[id]) {
+        if (id < 0 || id >= num_blocks_ || !is_allocated_[id] || seen[id]) {
             return false;
         }
+        seen[id] = true;
     }
     // Execution pass: safely return to free pool
     for (size_t i = 0; i < count; ++i) {
