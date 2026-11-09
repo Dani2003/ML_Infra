@@ -145,42 +145,37 @@ async def run_benchmark(base_url: str, num_requests: int, concurrency: int, min_
     avg_lat = sum(latencies) / len(latencies)
     avg_itl = (avg_lat / (total_tokens / len(successful))) * 1000 if total_tokens > 0 else 0
 
-    # 5. Continuous vs Naive Static Batching Simulation
-    # In static batching, every batch must wait for the slowest request (max_tokens).
-    # Idle GPU cycles occur while short requests finish and wait for longest request.
-    avg_tokens_per_req = total_tokens / len(successful) if successful else 1
-    wasted_bubble_fraction = 1.0 - (avg_tokens_per_req / max_tokens)
-    static_simulated_throughput = throughput_tokens_sec * (1.0 - wasted_bubble_fraction * 0.70)
-    speedup = throughput_tokens_sec / static_simulated_throughput if static_simulated_throughput > 0 else 1.0
-
     print("\n" + "=" * 70)
-    print("                     BENCHMARK RESULTS & TELEMETRY                   ")
+    print("                SCHEDULER & ALLOCATOR LOAD TEST RESULTS              ")
     print("=" * 70)
     print(f"Total Wall Time       : {t_total:.2f} s")
     print(f"Completed Requests    : {len(successful)} / {num_requests} (Failed: {failed})")
     print(f"Total Tokens Emitted  : {total_tokens} tokens")
-    print(f"Token Throughput      : {throughput_tokens_sec:.1f} tokens/sec")
+    print(f"Token Throughput      : {throughput_tokens_sec:.1f} tokens/sec (mock runner)")
     print(f"Request Throughput    : {throughput_reqs_sec:.2f} req/sec")
-    print(f"Inter-Token Latency   : ~{avg_itl:.2f} ms/token (average)")
+    print(f"Est. Step Latency     : ~{avg_itl:.2f} ms/step")
     print("-" * 70)
-    print("LATENCY PERCENTILES:")
+    print("LATENCY DISTRIBUTION (End-to-End):")
     print(f"  - Mean Latency : {avg_lat * 1000:.1f} ms")
     print(f"  - p50 (Median) : {p50 * 1000:.1f} ms")
     print(f"  - p90          : {p90 * 1000:.1f} ms")
     print(f"  - p95          : {p95 * 1000:.1f} ms")
     print(f"  - p99          : {p99 * 1000:.1f} ms")
     print("-" * 70)
-    print("MEMORY ALLOCATOR INVARIANTS (PagedAttention):")
+    print("MEMORY ALLOCATOR ACCOUNTING (PagedAttention Block Pool):")
     print(f"  - Total Physical Blocks : {int(total_blocks)}")
     print(f"  - Free Blocks (Initial) : {int(init_free_blocks)}")
     print(f"  - Free Blocks (Final)   : {int(post_free_blocks)}")
-    print(f"  - Memory Leaks Detected : {'0 (100% RECOVERED)' if post_free_blocks == init_free_blocks else f'{int(init_free_blocks - post_free_blocks)} leaked'}")
+    delta = int(init_free_blocks - post_free_blocks)
+    if delta == 0:
+        print("  - Pool Balance          : Baseline preserved (0 leaked blocks)")
+    else:
+        print(f"  - Pool Balance          : WARNING {delta} blocks unreturned")
     print(f"  - Allocator OOM Count   : {int(exhausted_count)}")
     print("-" * 70)
-    print("BATCHING EFFICIENCY COMPARISON:")
-    print(f"  - Continuous Batching Throughput : {throughput_tokens_sec:.1f} tok/s  [ACTIVE]")
-    print(f"  - Naive Static Batching Baseline : {static_simulated_throughput:.1f} tok/s  (Bubble overhead: {wasted_bubble_fraction * 100:.1f}%)")
-    print(f"  - Measured Throughput Gain       : {speedup:.2f}x ({'+' if speedup >= 1.0 else ''}{(speedup - 1.0) * 100:.1f}%)")
+    print("NOTE: This benchmark exercises the Tokio async admission queue,")
+    print("iteration scheduler, and C++ block table allocator under concurrency.")
+    print("Real model weights, prefill, and GPU tensor profiling are in development.")
     print("=" * 70 + "\n")
 
 def main():

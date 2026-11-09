@@ -10,6 +10,7 @@ fn main() {
     build.std("c++17");
     if build.get_compiler().is_like_msvc() {
         build.flag("/TP");
+        build.flag("/EHsc");
     }
     build.include(cuda_kernels_dir.join("include"));
     build.file(cuda_kernels_dir.join("src").join("memory_manager.cu"));

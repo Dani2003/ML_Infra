@@ -113,17 +113,37 @@ extern "C" void paged_attention_decode(const PagedAttentionParams* params) {
     if (!params || params->num_seqs <= 0 || params->num_heads <= 0) return;
 
 #ifdef USE_CUDA
+    size_t query_bytes = static_cast<size_t>(params->num_seqs) * params->num_heads * params->head_dim * sizeof(float);
+    size_t block_table_bytes = static_cast<size_t>(params->num_seqs) * params->max_blocks_per_seq * sizeof(int32_t);
+    size_t context_lens_bytes = static_cast<size_t>(params->num_seqs) * sizeof(int32_t);
+    size_t output_bytes = query_bytes;
+
+    float* d_query = nullptr;
+    int32_t* d_block_tables = nullptr;
+    int32_t* d_context_lens = nullptr;
+    float* d_output = nullptr;
+
+    CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_query), query_bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_block_tables), block_table_bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_context_lens), context_lens_bytes));
+    CHECK_CUDA_ERROR(cudaMalloc(reinterpret_cast<void**>(&d_output), output_bytes));
+
+    // Copy host inputs to device
+    CHECK_CUDA_ERROR(cudaMemcpy(d_query, params->query, query_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR(cudaMemcpy(d_block_tables, params->block_tables, block_table_bytes, cudaMemcpyHostToDevice));
+    CHECK_CUDA_ERROR(cudaMemcpy(d_context_lens, params->context_lens, context_lens_bytes, cudaMemcpyHostToDevice));
+
     dim3 grid(params->num_seqs, params->num_heads);
     dim3 block(std::min(params->head_dim, 256));
     size_t shared_bytes = (params->head_dim + 2048) * sizeof(float);
 
     paged_attention_kernel<<<grid, block, shared_bytes>>>(
-        params->query,
+        d_query,
         reinterpret_cast<const half*>(params->k_cache),
         reinterpret_cast<const half*>(params->v_cache),
-        params->block_tables,
-        params->context_lens,
-        params->output,
+        d_block_tables,
+        d_context_lens,
+        d_output,
         params->num_seqs,
         params->num_heads,
         params->head_dim,
@@ -131,7 +151,17 @@ extern "C" void paged_attention_decode(const PagedAttentionParams* params) {
         params->max_blocks_per_seq,
         params->scale
     );
-    cudaDeviceSynchronize();
+    CHECK_CUDA_ERROR(cudaGetLastError());
+    CHECK_CUDA_ERROR(cudaDeviceSynchronize());
+
+    // Copy device output back to host
+    CHECK_CUDA_ERROR(cudaMemcpy(params->output, d_output, output_bytes, cudaMemcpyDeviceToHost));
+
+    // Clean up staging buffers
+    cudaFree(d_query);
+    cudaFree(d_block_tables);
+    cudaFree(d_context_lens);
+    cudaFree(d_output);
 #else
     // CPU reference implementation of PagedAttention
     int block_stride = params->block_size * params->num_heads * params->head_dim;

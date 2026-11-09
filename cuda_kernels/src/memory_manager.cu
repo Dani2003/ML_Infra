@@ -42,6 +42,7 @@ KVCacheMemoryManager::KVCacheMemoryManager(
 
     // Populate free blocks stack (LIFO: 0, 1, ..., num_blocks-1)
     free_blocks_.reserve(num_blocks_);
+    is_allocated_.resize(num_blocks_, false);
     for (int32_t i = num_blocks_ - 1; i >= 0; --i) {
         free_blocks_.push_back(i);
     }
@@ -68,6 +69,7 @@ int32_t KVCacheMemoryManager::allocate_block() {
     }
     int32_t block_id = free_blocks_.back();
     free_blocks_.pop_back();
+    is_allocated_[block_id] = true;
     return block_id;
 }
 
@@ -76,19 +78,32 @@ bool KVCacheMemoryManager::free_block(int32_t block_id) {
         return false;
     }
     std::lock_guard<std::mutex> lock(mtx_);
+    if (!is_allocated_[block_id]) {
+        // Prevent double free
+        return false;
+    }
+    is_allocated_[block_id] = false;
     free_blocks_.push_back(block_id);
     return true;
 }
 
-void KVCacheMemoryManager::free_blocks(const int32_t* block_ids, size_t count) {
-    if (!block_ids || count == 0) return;
+bool KVCacheMemoryManager::free_blocks(const int32_t* block_ids, size_t count) {
+    if (!block_ids || count == 0) return true;
     std::lock_guard<std::mutex> lock(mtx_);
+    // Validation pass: reject if any block is invalid or not currently allocated
     for (size_t i = 0; i < count; ++i) {
         int32_t id = block_ids[i];
-        if (id >= 0 && id < num_blocks_) {
-            free_blocks_.push_back(id);
+        if (id < 0 || id >= num_blocks_ || !is_allocated_[id]) {
+            return false;
         }
     }
+    // Execution pass: safely return to free pool
+    for (size_t i = 0; i < count; ++i) {
+        int32_t id = block_ids[i];
+        is_allocated_[id] = false;
+        free_blocks_.push_back(id);
+    }
+    return true;
 }
 
 int32_t KVCacheMemoryManager::get_free_block_count() {
@@ -121,10 +136,8 @@ bool kv_cache_manager_free(KVCacheMemoryManager* mgr, int32_t block_id) {
     return mgr ? mgr->free_block(block_id) : false;
 }
 
-void kv_cache_manager_free_batch(KVCacheMemoryManager* mgr, const int32_t* block_ids, size_t count) {
-    if (mgr) {
-        mgr->free_blocks(block_ids, count);
-    }
+bool kv_cache_manager_free_batch(KVCacheMemoryManager* mgr, const int32_t* block_ids, size_t count) {
+    return mgr ? mgr->free_blocks(block_ids, count) : false;
 }
 
 int32_t kv_cache_manager_free_count(KVCacheMemoryManager* mgr) {

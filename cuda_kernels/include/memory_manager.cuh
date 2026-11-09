@@ -41,6 +41,8 @@ private:
 
     // Host-side fast LIFO stack of available physical block IDs
     std::vector<int32_t> free_blocks_;
+    // Allocation tracking to prevent double-frees and validate single-release guarantees
+    std::vector<bool> is_allocated_;
     std::mutex mtx_;
 
     bool is_cuda_allocated_;
@@ -52,11 +54,12 @@ public:
     // Allocate a physical block ID. Returns -1 if Out Of Memory (OOM).
     int32_t allocate_block();
 
-    // Release a single physical block back to the free pool.
+    // Release a single physical block back to the free pool. Returns false on invalid ID or double-free.
     bool free_block(int32_t block_id);
 
     // Release multiple physical blocks at once when a sequence finishes.
-    void free_blocks(const int32_t* block_ids, size_t count);
+    // Atomically checks all IDs; returns false if any block is invalid or not allocated.
+    bool free_blocks(const int32_t* block_ids, size_t count);
 
     // Block status inspection
     int32_t get_free_block_count();
@@ -77,7 +80,7 @@ extern "C" {
     void kv_cache_manager_destroy(KVCacheMemoryManager* mgr);
     int32_t kv_cache_manager_allocate(KVCacheMemoryManager* mgr);
     bool kv_cache_manager_free(KVCacheMemoryManager* mgr, int32_t block_id);
-    void kv_cache_manager_free_batch(KVCacheMemoryManager* mgr, const int32_t* block_ids, size_t count);
+    bool kv_cache_manager_free_batch(KVCacheMemoryManager* mgr, const int32_t* block_ids, size_t count);
     int32_t kv_cache_manager_free_count(KVCacheMemoryManager* mgr);
     void* kv_cache_manager_k_ptr(KVCacheMemoryManager* mgr);
     void* kv_cache_manager_v_ptr(KVCacheMemoryManager* mgr);

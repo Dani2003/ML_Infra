@@ -1,8 +1,13 @@
 # Benchmarks & Load Testing
 
-The benchmark suite exercises the inference engine under high concurrent async load to measure throughput, latency distributions, and memory allocator invariants.
+The benchmark suite exercises the `infer-rs` request pipeline, iteration scheduler, and PagedAttention block allocator under concurrent asynchronous load.
 
-## Running the Benchmark
+## Scope & Purpose
+
+* **What is measured:** Tokio async admission backpressure, iteration-level continuous slot refills, request latency distributions, and C++ physical block allocator accounting (allocations vs. frees).
+* **Current status:** The engine currently drives the scheduler lifecycle with a deterministic mock runner. Performance numbers reflect scheduler and control-plane dispatching capability. GPU tensor execution, prefill phases, and real-model comparisons against static batching baselines will be conducted in subsequent roadmap gates once hardware is attached.
+
+## Running the Load Test
 
 1. **Start the `infer-rs` server** in one terminal:
    ```powershell
@@ -14,10 +19,8 @@ The benchmark suite exercises the inference engine under high concurrent async l
    python benchmarks/load_test.py --requests 100 --concurrency 20 --min-tokens 8 --max-tokens 32
    ```
 
-## Measured Metrics
+## Output Metrics
 
-* **Tokens per Second (Throughput):** Aggregate generation throughput under multi-client concurrency.
-* **Latency Percentiles (p50, p90, p95, p99):** Round-trip end-to-end request latency distribution.
-* **Average Inter-Token Latency (ITL):** Average delay between successive token generations.
-* **PagedAttention Memory Invariant:** Asserts that 100% of physical blocks assigned to requests during inference are reclaimed upon completion, returning free blocks to baseline without leaks.
-* **Continuous Batching vs. Static Batching Speedup:** Computes the throughput gain achieved by continuous iteration-level slot refills over fixed-batch padding bubbles.
+* **Request Completion & Failure Rate:** Confirms bounded channel admission and timeout handling.
+* **Round-Trip Latency Percentiles (p50, p90, p95, p99):** Measures end-to-end client latency under bursty concurrency.
+* **Block Allocator Accounting:** Verifies that all physical blocks allocated during request generation are cleanly returned to the free pool upon completion.
