@@ -55,6 +55,7 @@ unsafe extern "C" {
     fn kv_cache_manager_free(mgr: *mut c_void, block_id: i32) -> bool;
     fn kv_cache_manager_free_batch(mgr: *mut c_void, block_ids: *const i32, count: usize) -> bool;
     fn kv_cache_manager_free_count(mgr: *mut c_void) -> i32;
+    fn kv_cache_manager_is_allocated(mgr: *mut c_void, block_id: i32) -> bool;
     fn kv_cache_manager_k_ptr(mgr: *mut c_void) -> *mut c_void;
     fn kv_cache_manager_v_ptr(mgr: *mut c_void) -> *mut c_void;
     fn kv_cache_manager_write_kv(
@@ -120,6 +121,15 @@ impl GpuKVCacheManager {
         count.max(0) as usize
     }
 
+    /// Check whether a physical block ID is actively allocated in the cache pool.
+    pub fn is_block_allocated(&self, block_id: u32) -> bool {
+        if let Ok(id) = i32::try_from(block_id) {
+            unsafe { kv_cache_manager_is_allocated(self.raw, id) }
+        } else {
+            false
+        }
+    }
+
     /// Allocate a physical block ID from the C++/CUDA manager.
     /// Returns None if out of physical GPU memory.
     pub fn allocate_block(&self) -> Option<u32> {
@@ -172,6 +182,7 @@ impl GpuKVCacheManager {
             || token_offset >= self.block_size
             || head_idx >= self.num_heads
             || data.len() != self.head_dim
+            || !self.is_block_allocated(physical_block as u32)
         {
             return Err(FfiError::InvalidArgument);
         }
@@ -277,7 +288,10 @@ impl GpuKVCacheManager {
                 let row_offset = s * max_blocks_per_seq;
                 for b in 0..needed_blocks {
                     let phys_id = block_tables[row_offset + b];
-                    if phys_id < 0 || (phys_id as usize) >= self.total_blocks {
+                    if phys_id < 0
+                        || (phys_id as usize) >= self.total_blocks
+                        || !self.is_block_allocated(phys_id as u32)
+                    {
                         return Err(FfiError::InvalidBlock(phys_id as u32));
                     }
                 }
@@ -407,9 +421,13 @@ mod tests {
         let head_dim = 8;
         let mgr = GpuKVCacheManager::new(num_blocks, block_size, num_heads, head_dim).unwrap();
 
+        // Allocate physical blocks to satisfy cache ownership contract
+        let b0 = mgr.allocate_block().expect("must allocate b0");
+        let b1 = mgr.allocate_block().expect("must allocate b1");
+
         let num_seqs = 1;
         let query = vec![1.0f32; num_seqs * num_heads * head_dim];
-        let block_tables = vec![0i32, 1i32];
+        let block_tables = vec![b0 as i32, b1 as i32];
         let context_lens = vec![4i32];
         let mut output = vec![0.0f32; num_seqs * num_heads * head_dim];
 
@@ -455,13 +473,15 @@ mod tests {
     #[test]
     fn test_decode_attention_slice_dimension_validation() {
         let mgr = GpuKVCacheManager::new(4, 4, 2, 8).unwrap();
+        let b0 = mgr.allocate_block().unwrap();
+        let b1 = mgr.allocate_block().unwrap();
+
         let num_seqs = 1;
         let correct_q_len = num_seqs * 2 * 8; // 16
         let max_blocks = 2;
-        let correct_bt_len = num_seqs * max_blocks; // 2
 
         let mut output = vec![0.0f32; correct_q_len];
-        let block_tables = vec![0i32; correct_bt_len];
+        let block_tables = vec![b0 as i32, b1 as i32];
         let context_lens = vec![2i32];
 
         // Short query slice
@@ -504,7 +524,7 @@ mod tests {
         );
 
         // Short block tables slice
-        let short_bt = vec![0i32; 1];
+        let short_bt = vec![b0 as i32];
         let res = mgr.decode_attention(
             &query,
             &short_bt,
@@ -530,7 +550,7 @@ mod tests {
         let mut output = vec![0.0f32; 4];
         let context_lens = vec![2i32]; // Needs 1 block (logical block 0)
 
-        // Block table references out-of-range physical block 999
+        // Case 1: Block table references out-of-range physical block 999
         let invalid_bt = vec![999i32];
         let res = mgr.decode_attention(
             &query,
@@ -542,7 +562,7 @@ mod tests {
         );
         assert_eq!(res, Err(FfiError::InvalidBlock(999)));
 
-        // Block table references negative physical block -1
+        // Case 2: Block table references negative physical block -1
         let neg_bt = vec![-1i32];
         let res = mgr.decode_attention(
             &query,
@@ -553,23 +573,41 @@ mod tests {
             &mut output,
         );
         assert!(matches!(res, Err(FfiError::InvalidBlock(_))));
+
+        // Case 3: Block table references in-range block (0) that is NOT allocated
+        let unallocated_bt = vec![0i32];
+        let res = mgr.decode_attention(
+            &query,
+            &unallocated_bt,
+            &context_lens,
+            1,
+            1.0,
+            &mut output,
+        );
+        assert_eq!(
+            res,
+            Err(FfiError::InvalidBlock(0)),
+            "unallocated physical block must be rejected by decode_attention"
+        );
     }
 
     #[test]
     fn test_paged_attention_numeric_correctness_nonzero() {
         // Setup a 1-head, head_dim=2 attention scenario with 2 tokens in block 0
         let mgr = GpuKVCacheManager::new(2, 2, 1, 2).unwrap();
+        let b0 = mgr.allocate_block().expect("must allocate b0");
+
         let q = vec![1.0f32, 0.0f32];
         let mut output = vec![0.0f32; 2];
 
         // Token 0: K = [1.0, 0.0], V = [10.0, 20.0]
         // Token 1: K = [0.0, 1.0], V = [30.0, 40.0]
-        mgr.write_kv_token(true, 0, 0, 0, &[1.0, 0.0]).unwrap();
-        mgr.write_kv_token(false, 0, 0, 0, &[10.0, 20.0]).unwrap();
-        mgr.write_kv_token(true, 0, 1, 0, &[0.0, 1.0]).unwrap();
-        mgr.write_kv_token(false, 0, 1, 0, &[30.0, 40.0]).unwrap();
+        mgr.write_kv_token(true, b0 as usize, 0, 0, &[1.0, 0.0]).unwrap();
+        mgr.write_kv_token(false, b0 as usize, 0, 0, &[10.0, 20.0]).unwrap();
+        mgr.write_kv_token(true, b0 as usize, 1, 0, &[0.0, 1.0]).unwrap();
+        mgr.write_kv_token(false, b0 as usize, 1, 0, &[30.0, 40.0]).unwrap();
 
-        let block_tables = vec![0i32];
+        let block_tables = vec![b0 as i32];
         let context_lens = vec![2i32];
         let scale = 1.0f32;
 
@@ -612,23 +650,26 @@ mod tests {
     #[test]
     fn test_paged_attention_multiblock_mapping_correctness() {
         // Test that PagedAttention correctly resolves tokens spanning multiple physical blocks:
-        // block_size = 1, so Token 0 is in physical block 1, Token 1 is in physical block 0.
+        // block_size = 1, so Token 0 is in physical block b1, Token 1 is in physical block b0.
         let mgr = GpuKVCacheManager::new(2, 1, 1, 2).unwrap();
+        let b0 = mgr.allocate_block().expect("must allocate first block");
+        let b1 = mgr.allocate_block().expect("must allocate second block");
+
         let q = vec![1.0f32, 0.0f32];
         let mut output = vec![0.0f32; 2];
 
-        // Logical Token 0 mapped to physical block 1
-        // Logical Token 1 mapped to physical block 0
-        // Block 1 (Token 0): K = [1.0, 0.0], V = [10.0, 20.0]
-        mgr.write_kv_token(true, 1, 0, 0, &[1.0, 0.0]).unwrap();
-        mgr.write_kv_token(false, 1, 0, 0, &[10.0, 20.0]).unwrap();
+        // Logical Token 0 mapped to physical block b1
+        // Logical Token 1 mapped to physical block b0
+        // Block b1 (Token 0): K = [1.0, 0.0], V = [10.0, 20.0]
+        mgr.write_kv_token(true, b1 as usize, 0, 0, &[1.0, 0.0]).unwrap();
+        mgr.write_kv_token(false, b1 as usize, 0, 0, &[10.0, 20.0]).unwrap();
 
-        // Block 0 (Token 1): K = [0.0, 1.0], V = [30.0, 40.0]
-        mgr.write_kv_token(true, 0, 0, 0, &[0.0, 1.0]).unwrap();
-        mgr.write_kv_token(false, 0, 0, 0, &[30.0, 40.0]).unwrap();
+        // Block b0 (Token 1): K = [0.0, 1.0], V = [30.0, 40.0]
+        mgr.write_kv_token(true, b0 as usize, 0, 0, &[0.0, 1.0]).unwrap();
+        mgr.write_kv_token(false, b0 as usize, 0, 0, &[30.0, 40.0]).unwrap();
 
-        // Logical-to-physical block table: [block 1, block 0]
-        let block_tables = vec![1i32, 0i32];
+        // Logical-to-physical block table: [block b1, block b0]
+        let block_tables = vec![b1 as i32, b0 as i32];
         let context_lens = vec![2i32];
         let scale = 1.0f32;
 
@@ -654,6 +695,48 @@ mod tests {
         assert!(
             (output[1] - expected_1).abs() < 1e-4,
             "output[1] mismatch: got {}, expected {}", output[1], expected_1
+        );
+    }
+
+    #[test]
+    fn test_cache_ownership_lifecycle() {
+        let mgr = GpuKVCacheManager::new(2, 2, 1, 2).unwrap();
+        let q = vec![1.0f32, 0.0f32];
+        let mut out = vec![0.0f32; 2];
+
+        // 1. Unallocated write must fail
+        assert_eq!(
+            mgr.write_kv_token(true, 0, 0, 0, &[1.0, 0.0]),
+            Err(FfiError::InvalidArgument)
+        );
+
+        // 2. Unallocated decode must fail
+        assert_eq!(
+            mgr.decode_attention(&q, &[0i32], &[1i32], 1, 1.0, &mut out),
+            Err(FfiError::InvalidBlock(0))
+        );
+
+        // 3. Allocate block
+        let b0 = mgr.allocate_block().unwrap();
+        assert!(mgr.is_block_allocated(b0));
+
+        // 4. Allocated write & decode succeed
+        assert!(mgr.write_kv_token(true, b0 as usize, 0, 0, &[1.0, 0.0]).is_ok());
+        assert!(mgr.write_kv_token(false, b0 as usize, 0, 0, &[1.0, 0.0]).is_ok());
+        assert!(mgr.decode_attention(&q, &[b0 as i32], &[1i32], 1, 1.0, &mut out).is_ok());
+
+        // 5. Free block
+        assert!(mgr.free_block(b0));
+        assert!(!mgr.is_block_allocated(b0));
+
+        // 6. Accessing freed block must be rejected again
+        assert_eq!(
+            mgr.write_kv_token(true, b0 as usize, 0, 0, &[1.0, 0.0]),
+            Err(FfiError::InvalidArgument)
+        );
+        assert_eq!(
+            mgr.decode_attention(&q, &[b0 as i32], &[1i32], 1, 1.0, &mut out),
+            Err(FfiError::InvalidBlock(b0))
         );
     }
 }

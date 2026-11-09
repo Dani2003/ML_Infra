@@ -1,6 +1,6 @@
 # infer-rs: LLM Serving Infrastructure & PagedAttention Prototype
 
-[![Build & Test](https://img.shields.io/badge/tests-17%20passed%20(CPU)-brightgreen.svg)]()
+[![Build & Test](https://img.shields.io/badge/tests-18%20passed%20(CPU)-brightgreen.svg)]()
 [![Rust](https://img.shields.io/badge/rust-2024%20edition-orange.svg)]()
 [![C++/CUDA](https://img.shields.io/badge/C%2B%2B-17%20%2F%20CUDA-blue.svg)]()
 [![License](https://img.shields.io/badge/license-MIT-blue.svg)]()
@@ -9,7 +9,7 @@
 1. **Dynamic Continuous Batching:** An iteration-level request scheduler that fills batch slots dynamically at step boundaries rather than stalling on full sequence completion.
 2. **PagedAttention Virtual Memory Management:** A fixed-size physical block allocator and block table mapping designed to eliminate memory fragmentation during generation.
 
-> **Project Stage:** This repository is an active infrastructure prototype (Gate 1 & Gate 2 of the [Engineering Roadmap](docs/roadmap.md)). The request pipeline, scheduler, CPU reference kernels (17 automated tests passing on CPU fallback), and C++ memory manager are fully tested. The CUDA path is currently implemented with explicit device staging and compiled conditionally; physical GPU benchmarking requires an NVIDIA device with `nvcc`. Real model weight execution and tokenizer integration are currently under development.
+> **Project Stage:** This repository is an active infrastructure prototype (Gate 1 & Gate 2 of the [Engineering Roadmap](docs/roadmap.md)). The request pipeline, scheduler, CPU reference kernels (18 automated tests passing on CPU fallback), and C++ memory manager are fully tested. The CUDA path is currently implemented with explicit device staging and compiled conditionally; physical GPU benchmarking requires an NVIDIA device with `nvcc`. Real model weight execution and tokenizer integration are currently under development.
 
 ---
 
@@ -107,13 +107,14 @@ See [docs/roadmap.md](docs/roadmap.md) for the complete milestone gates and exit
 * **C++ Compiler:** MSVC (Visual Studio 2022 C++ Build Tools) or GCC/Clang
 * **CUDA Toolkit (Optional):** Automatically detected by `build.rs` if `nvcc` is installed.
 
-### 1. Run Unit Tests (17 Automated Tests on CPU Fallback)
+### 1. Run Unit Tests (18 Automated Tests on CPU Fallback)
 ```powershell
 cargo test
 ```
 Validates:
 * Block pool allocation invariants, capacity exhaustion, and intra-batch double-free rejection in both Rust and C++.
-* Safe Rust FFI slice boundary enforcement, dimension checks, and invalid block table ID rejection.
+* Cache ownership contract: enforces that physical blocks must be actively allocated before writing or reading.
+* Safe Rust FFI slice boundary enforcement, dimension checks, and unallocated/invalid block table ID rejection.
 * Numerical correctness of PagedAttention against analytical mathematical references with non-zero K/V vectors across multi-block layouts.
 * Scheduler continuous slot refills, bounded backpressure, cancellation, and RAII single-release cache cleanup.
 

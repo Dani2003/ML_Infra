@@ -73,7 +73,11 @@ public:
     half_type* get_k_cache_ptr() const { return d_k_cache_; }
     half_type* get_v_cache_ptr() const { return d_v_cache_; }
 
+    // Validates whether a specific physical block ID is actively allocated
+    bool is_block_allocated(int32_t block_id);
+
     // Safely writes a token vector into physical cache memory.
+    // Rejects access if the target block is not actively allocated.
     // Performs host-to-device transfer on CUDA; encodes to IEEE 754 half on CPU fallback.
     bool write_kv(bool is_k, int32_t physical_block, int32_t token_offset, int32_t head_idx, const float* host_data, size_t count);
 };
@@ -87,6 +91,7 @@ extern "C" {
     bool kv_cache_manager_free(KVCacheMemoryManager* mgr, int32_t block_id);
     bool kv_cache_manager_free_batch(KVCacheMemoryManager* mgr, const int32_t* block_ids, size_t count);
     int32_t kv_cache_manager_free_count(KVCacheMemoryManager* mgr);
+    bool kv_cache_manager_is_allocated(KVCacheMemoryManager* mgr, int32_t block_id);
     void* kv_cache_manager_k_ptr(KVCacheMemoryManager* mgr);
     void* kv_cache_manager_v_ptr(KVCacheMemoryManager* mgr);
     bool kv_cache_manager_write_kv(

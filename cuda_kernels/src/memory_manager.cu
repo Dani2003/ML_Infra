@@ -114,6 +114,12 @@ int32_t KVCacheMemoryManager::get_free_block_count() {
     return static_cast<int32_t>(free_blocks_.size());
 }
 
+bool KVCacheMemoryManager::is_block_allocated(int32_t block_id) {
+    if (block_id < 0 || block_id >= num_blocks_) return false;
+    std::lock_guard<std::mutex> lock(mtx_);
+    return is_allocated_[block_id];
+}
+
 bool KVCacheMemoryManager::write_kv(
     bool is_k,
     int32_t physical_block,
@@ -127,6 +133,14 @@ bool KVCacheMemoryManager::write_kv(
     if (head_idx < 0 || head_idx >= num_heads_) return false;
     if (count != static_cast<size_t>(head_dim_)) return false;
     if (!host_data) return false;
+
+    // Strict cache ownership contract: reject access to unallocated blocks
+    {
+        std::lock_guard<std::mutex> lock(mtx_);
+        if (!is_allocated_[physical_block]) {
+            return false;
+        }
+    }
 
     int block_stride = block_size_ * num_heads_ * head_dim_;
     int token_stride = num_heads_ * head_dim_;
@@ -210,6 +224,15 @@ int32_t kv_cache_manager_free_count(KVCacheMemoryManager* mgr) {
         return mgr->get_free_block_count();
     } catch (...) {
         return 0;
+    }
+}
+
+bool kv_cache_manager_is_allocated(KVCacheMemoryManager* mgr, int32_t block_id) {
+    if (!mgr) return false;
+    try {
+        return mgr->is_block_allocated(block_id);
+    } catch (...) {
+        return false;
     }
 }
 
